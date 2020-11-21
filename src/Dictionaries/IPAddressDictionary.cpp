@@ -181,24 +181,43 @@ static bool matchIPv4Subnet(UInt32 target, UInt32 addr, UInt8 prefix)
 #if defined(__SSE2__)
 #include <emmintrin.h>
 
+constexpr size_t IPV6_MASKS_COUNT = 256;
+
+using RawMaskArray = std::array<uint8_t, IPV6_BINARY_LENGTH>;
+
+static constexpr RawMaskArray generateBitMask(size_t prefix)
+{
+    if (prefix >= 128)
+        prefix = 128;
+    RawMaskArray arr{};
+    size_t i = 0;
+    for (; prefix >= 8; ++i, prefix -= 8)
+        arr[i] = 0xff;
+    if (prefix > 0)
+        arr[i++] = ~(0xff >> prefix);
+    while (i < 16)
+        arr[i++] = 0x00;
+    return arr;
+}
+
+static constexpr std::array<RawMaskArray, IPV6_MASKS_COUNT> generateBitMasks()
+{
+    std::array<RawMaskArray, IPV6_MASKS_COUNT> arr{};
+    for (size_t i = 0; i < IPV6_MASKS_COUNT; ++i)
+        arr[i] = generateBitMask(i);
+    return arr;
+}
+
 static bool matchIPv6Subnet(const uint8_t * target, const uint8_t * addr, UInt8 prefix)
 {
-    uint16_t mask = _mm_movemask_epi8(_mm_cmpeq_epi8(
+    static constexpr std::array<RawMaskArray, IPV6_MASKS_COUNT> IPV6_RAW_MASK_ARRAY = generateBitMasks();
+
+    __m128i masked_target = _mm_and_si128(
         _mm_loadu_si128(reinterpret_cast<const __m128i *>(target)),
-        _mm_loadu_si128(reinterpret_cast<const __m128i *>(addr))));
-    mask = ~mask;
+        _mm_loadu_si128(reinterpret_cast<const __m128i *>(IPV6_RAW_MASK_ARRAY[prefix].data())));
 
-    if (mask)
-    {
-        auto offset = __builtin_ctz(mask);
-
-        if (prefix / 8 != offset)
-            return prefix / 8 < offset;
-
-        auto cmpmask = ~(0xff >> (prefix % 8));
-        return (target[offset] & cmpmask) == addr[offset];
-    }
-    return true;
+    return 0xFFFF == _mm_movemask_epi8(_mm_cmpeq_epi8(
+        masked_target, _mm_loadu_si128(reinterpret_cast<const __m128i *>(addr))));
 }
 
 # else
