@@ -598,13 +598,13 @@ void IPAddressDictionary::loadData()
     }
 
     parent_subnet.resize(ip_records.size());
-    std::stack<size_t> subnets_stack;
-    for (const auto i : ext::range(0, ip_records.size()))
+    parent_subnet[0] = 0;
+    for (const auto i : ext::range(1, ip_records.size()))
     {
         parent_subnet[i] = i;
-        while (!subnets_stack.empty())
+        for (size_t pi = i - 1;; pi = parent_subnet[pi])
         {
-            size_t pi = subnets_stack.top();
+
             if (has_ipv6)
             {
                 uint8_t a_buf[IPV6_BINARY_LENGTH];
@@ -631,9 +631,9 @@ void IPAddressDictionary::loadData()
                     break;
                 }
             }
-            subnets_stack.pop();
+            if (pi == parent_subnet[pi])
+                break;
         }
-        subnets_stack.push(i);
     }
 
     LOG_TRACE(logger, "{} ip records are read", ip_records.size());
