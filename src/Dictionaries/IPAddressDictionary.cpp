@@ -29,6 +29,9 @@ namespace ErrorCodes
 
 namespace
 {
+    constexpr size_t IPV4_PREFETCH_STEP = 16;
+    constexpr size_t IPV6_PREFETCH_STEP = 4;
+
     /// Intermediate structure that are used in loading procedure
     struct IPRecord
     {
@@ -61,18 +64,6 @@ namespace
         {
             return isv6 ? prefix : prefix + 96;
         }
-    };
-
-    struct IPv4Subnet
-    {
-        UInt32 addr;
-        UInt8 prefix;
-    };
-
-    struct IPv6Subnet
-    {
-        const uint8_t * addr;
-        UInt8 prefix;
     };
 }
 
@@ -122,6 +113,87 @@ static void validateKeyTypes(const DataTypes & key_types)
         if (mask_col_type == nullptr)
             throw Exception{"Mask do not match, expected UInt8", ErrorCodes::TYPE_MISMATCH};
     }
+}
+
+template <typename Comp>
+static size_t ALWAYS_INLINE findEytzinger(size_t length, bool lower_bound, Comp comp)
+{
+    size_t k = 1;
+    while (k < length)
+    {
+        size_t step = comp(k) ? 1 : 0;
+        k = 2 * k + step;
+    }
+    if (lower_bound)
+        k >>= __builtin_ffs(~k);
+    else
+        k >>= __builtin_ffs(~(k-1));
+    return k;
+}
+
+static size_t generateEytzingerLayout(size_t i, size_t k, std::vector<size_t> & dst)
+{
+    if (k <= dst.size())
+    {
+        i = generateEytzingerLayout(i, 2 * k, dst);
+        dst[i++] = k-1;
+        i = generateEytzingerLayout(i, 2 * k + 1, dst);
+    }
+    return i;
+}
+
+static std::vector<size_t> generateEytzingerLayout(size_t length)
+{
+    std::vector<size_t> perm;
+    perm.resize(length);
+    generateEytzingerLayout(0, 1, perm);
+    return perm;
+}
+
+template <typename T>
+static void applyLayout(std::vector<T> & vec, const std::vector<size_t> & perm)
+{
+    std::vector<T> dst = vec;
+    for (size_t i : ext::range(0, vec.size()))
+        dst[perm[i]] = std::move(vec[i]);
+    vec = std::move(dst);
+}
+
+static void applyLayoutForIndices(std::vector<size_t> & vec, const std::vector<size_t> & perm, size_t shift)
+{
+    std::vector<size_t> dst;
+    dst.resize(vec.size() + shift);
+    for (size_t i : ext::range(0, vec.size()))
+        dst[perm[i] + shift] = perm[vec[i]] + shift;
+
+    vec = std::move(dst);
+}
+
+template <typename Comp>
+static void buildSubnetworkLayout(std::vector<IPRecord> & ip_records, std::vector<size_t> & parent_subnet, Comp matcher)
+{
+    parent_subnet.resize(ip_records.size());
+    parent_subnet[0] = 0;
+    for (const auto i : ext::range(1, ip_records.size()))
+    {
+        parent_subnet[i] = i;
+        for (size_t pi = i - 1;; pi = parent_subnet[pi])
+        {
+            if (matcher(ip_records[i], ip_records[pi]))
+            {
+                parent_subnet[i] = pi;
+                break;
+            }
+            if (pi == parent_subnet[pi])
+            {
+                break;
+            }
+        }
+    }
+
+    std::vector<size_t> perm = generateEytzingerLayout(ip_records.size());
+    applyLayout(ip_records, perm);
+    applyLayoutForIndices(parent_subnet, perm, 1);
 }
 
 template <typename T, typename Comp>
@@ -501,8 +573,8 @@ void IPAddressDictionary::loadData()
 
     std::vector<IPRecord> ip_records;
 
-    row_idx.reserve(keys_size);
-    mask_column.reserve(keys_size);
+    row_idx.reserve(keys_size + 1);
+    mask_column.reserve(keys_size + 1);
 
     bool has_ipv6 = false;
 
@@ -556,11 +628,25 @@ void IPAddressDictionary::loadData()
                     return compareTo(record_a.prefixIPv6(), record_b.prefixIPv6());
                 return cmpres;
             });
+
         if (deleted_count > 0)
             LOG_WARNING(logger, "removing {} non-unique subnets from input", deleted_count);
 
+        buildSubnetworkLayout(ip_records, parent_subnet,
+            [](const IPRecord & record_a, const IPRecord & record_b) {
+                uint8_t a_buf[IPV6_BINARY_LENGTH], b_buf[IPV6_BINARY_LENGTH];
+                const auto * cur_address = record_a.asIPv6Binary(a_buf);
+                const auto * cur_subnet = record_b.asIPv6Binary(b_buf);
+                bool is_mask_smaller = record_b.prefixIPv6() < record_a.prefixIPv6();
+                return is_mask_smaller && matchIPv6Subnet(cur_address, cur_subnet, record_b.prefixIPv6());
+            });
+
         auto & ipv6_col = ip_column.emplace<IPv6Container>();
-        ipv6_col.resize_fill(IPV6_BINARY_LENGTH * ip_records.size());
+
+        // dummy element at zero position
+        ipv6_col.resize_fill(IPV6_BINARY_LENGTH * (ip_records.size() + 1));
+        mask_column.push_back(0);
+        row_idx.push_back(0);
 
         for (const auto & record : ip_records)
         {
@@ -586,53 +672,28 @@ void IPAddressDictionary::loadData()
         if (deleted_count > 0)
             LOG_WARNING(logger, "removing {} non-unique subnets from input", deleted_count);
 
+        buildSubnetworkLayout(ip_records, parent_subnet,
+            [](const IPRecord & record_a, const IPRecord & record_b) {
+                UInt32 cur_address = IPv4AsUInt32(record_a.addr.addr());
+                UInt32 cur_subnet = IPv4AsUInt32(record_b.addr.addr());
+                bool is_mask_smaller = record_b.prefix < record_a.prefix;
+                return is_mask_smaller && matchIPv4Subnet(cur_address, cur_subnet, record_b.prefix);
+            });
+
         auto & ipv4_col = ip_column.emplace<IPv4Container>();
-        ipv4_col.reserve(ip_records.size());
+        ipv4_col.reserve(ip_records.size() + 1);
+
+        // dummy element at zero position
+        ipv4_col.push_back(0);
+        mask_column.push_back(0);
+        row_idx.push_back(0);
+
         for (const auto & record : ip_records)
         {
             auto addr = IPv4AsUInt32(record.addr.addr());
             ipv4_col.push_back(addr);
             mask_column.push_back(record.prefix);
             row_idx.push_back(record.row);
-        }
-    }
-
-    parent_subnet.resize(ip_records.size());
-    parent_subnet[0] = 0;
-    for (const auto i : ext::range(1, ip_records.size()))
-    {
-        parent_subnet[i] = i;
-        for (size_t pi = i - 1;; pi = parent_subnet[pi])
-        {
-
-            if (has_ipv6)
-            {
-                uint8_t a_buf[IPV6_BINARY_LENGTH];
-                uint8_t b_buf[IPV6_BINARY_LENGTH];
-                const auto * cur_address = ip_records[i].asIPv6Binary(a_buf);
-                const auto * cur_subnet = ip_records[pi].asIPv6Binary(b_buf);
-
-                bool is_mask_smaller = ip_records[pi].prefixIPv6() < ip_records[i].prefixIPv6();
-                if (is_mask_smaller && matchIPv6Subnet(cur_address, cur_subnet, ip_records[pi].prefixIPv6()))
-                {
-                    parent_subnet[i] = pi;
-                    break;
-                }
-            }
-            else
-            {
-                UInt32 cur_address = IPv4AsUInt32(ip_records[i].addr.addr());
-                UInt32 cur_subnet = IPv4AsUInt32(ip_records[pi].addr.addr());
-
-                bool is_mask_smaller = ip_records[pi].prefix < ip_records[i].prefix;
-                if (is_mask_smaller && matchIPv4Subnet(cur_address, cur_subnet, ip_records[pi].prefix))
-                {
-                    parent_subnet[i] = pi;
-                    break;
-                }
-            }
-            if (pi == parent_subnet[pi])
-                break;
         }
     }
 
@@ -815,28 +876,24 @@ void IPAddressDictionary::getItemsByTwoKeyColumnsImpl(
 
         const auto & key_mask_column = assert_cast<const ColumnVector<UInt8> &>(*key_columns.back());
 
-        auto comp_v4 = [&](size_t elem, const IPv4Subnet & target)
-        {
-            UInt32 addr = (*ipv4_col)[elem];
-            if (addr == target.addr)
-                return mask_column[elem] < target.prefix;
-            return addr < target.addr;
-        };
-
         for (const auto i : ext::range(0, rows))
         {
-            UInt32 addr = key_ip_column_ptr->getElement(i);
-            UInt8 mask = key_mask_column.getElement(i);
+            UInt32 target_addr = key_ip_column_ptr->getElement(i);
+            UInt8 target_mask = key_mask_column.getElement(i);
 
-            auto range = ext::range(0, row_idx.size());
-            auto found_it = std::lower_bound(range.begin(), range.end(), IPv4Subnet{addr, mask}, comp_v4);
-
-            if (likely(found_it != range.end() &&
-                (*ipv4_col)[*found_it] == addr &&
-                mask_column[*found_it] == mask))
+            size_t found = findEytzinger(row_idx.size(), true, [&](size_t k)
             {
-                set_value(i, static_cast<OutputType>(vec[row_idx[*found_it]]));
-            }
+                __builtin_prefetch(ipv4_col->data() + k * IPV4_PREFETCH_STEP);
+                UInt32 addr = (*ipv4_col)[k];
+                if (addr == target_addr)
+                    return mask_column[k] < target_mask;
+                return addr < target_addr;
+            });
+
+            if (likely(found != 0 &&
+                (*ipv4_col)[found] == target_addr &&
+                mask_column[found] == target_mask))
+                set_value(i, static_cast<OutputType>(vec[row_idx[found]]));
             else
                 set_value(i, get_default(i));
         }
@@ -850,28 +907,26 @@ void IPAddressDictionary::getItemsByTwoKeyColumnsImpl(
     const auto & key_mask_column = assert_cast<const ColumnVector<UInt8> &>(*key_columns.back());
 
     const auto * ipv6_col = std::get_if<IPv6Container>(&ip_column);
-    auto comp_v6 = [&](size_t i, const IPv6Subnet & target)
-    {
-        auto cmpres = memcmp16(getIPv6FromOffset(*ipv6_col, i), target.addr);
-        if (cmpres == 0)
-            return mask_column[i] < target.prefix;
-        return cmpres < 0;
-    };
 
     for (const auto i : ext::range(0, rows))
     {
-        auto addr = key_ip_column_ptr->getDataAt(i);
-        UInt8 mask = key_mask_column.getElement(i);
+        const auto * target_addr = reinterpret_cast<const uint8_t *>(key_ip_column_ptr->getDataAt(i).data);
+        UInt8 target_mask = key_mask_column.getElement(i);
 
-        IPv6Subnet target{reinterpret_cast<const uint8_t *>(addr.data), mask};
+        size_t found = findEytzinger(row_idx.size(), true, [&](size_t k)
+        {
+            /// We don't prefetch masks because equals addresses are not often case
+            __builtin_prefetch(ipv6_col->data() + k * IPV6_PREFETCH_STEP * IPV6_BINARY_LENGTH);
+            auto cmpres = memcmp16(getIPv6FromOffset(*ipv6_col, k), target_addr);
+            if (cmpres == 0)
+                return mask_column[k] < target_mask;
+            return cmpres < 0;
+        });
 
-        auto range = ext::range(0, row_idx.size());
-        auto found_it = std::lower_bound(range.begin(), range.end(), target, comp_v6);
-
-        if (likely(found_it != range.end() &&
-            memequal16(getIPv6FromOffset(*ipv6_col, *found_it), target.addr) &&
-            mask_column[*found_it] == mask))
-            set_value(i, static_cast<OutputType>(vec[row_idx[*found_it]]));
+        if (likely(found != 0 &&
+            memequal16(getIPv6FromOffset(*ipv6_col, found), target_addr) &&
+            mask_column[found] == target_mask))
+            set_value(i, static_cast<OutputType>(vec[row_idx[found]]));
         else
             set_value(i, get_default(i));
     }
@@ -1025,7 +1080,7 @@ Columns IPAddressDictionary::getKeyColumns() const
     {
         auto key_ip_column = ColumnVector<UInt32>::create();
         auto key_mask_column = ColumnVector<UInt8>::create();
-        for (size_t row : ext::range(0, row_idx.size()))
+        for (size_t row : ext::range(1, row_idx.size()))
         {
             key_ip_column->insertValue((*ipv4_col)[row]);
             key_mask_column->insertValue(mask_column[row]);
@@ -1038,7 +1093,7 @@ Columns IPAddressDictionary::getKeyColumns() const
     auto key_ip_column = ColumnFixedString::create(IPV6_BINARY_LENGTH);
     auto key_mask_column = ColumnVector<UInt8>::create();
 
-    for (size_t row : ext::range(0, row_idx.size()))
+    for (size_t row : ext::range(1, row_idx.size()))
     {
         const char * data = reinterpret_cast<const char *>(getIPv6FromOffset(*ipv6_col, row));
         key_ip_column->insertData(data, IPV6_BINARY_LENGTH);
@@ -1138,32 +1193,38 @@ IPAddressDictionary::RowIdxConstIter IPAddressDictionary::tryLookupIPv6(const ui
 template <typename IPContainerType, typename IPValueType>
 IPAddressDictionary::RowIdxConstIter IPAddressDictionary::lookupIP(IPValueType target) const
 {
-    if (row_idx.empty())
+    if (row_idx.size() <= 1)
         return ipNotFound();
 
     const auto * ipv4or6_col = std::get_if<IPContainerType>(&ip_column);
     if (ipv4or6_col == nullptr)
         return ipNotFound();
 
-    auto comp = [&](auto value, auto idx) -> bool
+
+    size_t found = findEytzinger(row_idx.size(), false, [&](size_t k)
     {
         if constexpr (std::is_same_v<IPContainerType, IPv4Container>)
-            return value < (*ipv4or6_col)[idx];
+        {
+            __builtin_prefetch(ipv4or6_col->data() + k * IPV4_PREFETCH_STEP);
+            auto val = (*ipv4or6_col)[k];
+            return val <= target;
+        }
         else
-            return memcmp16(value, getIPv6FromOffset(*ipv4or6_col, idx)) < 0;
-    };
+        {
+            __builtin_prefetch(ipv4or6_col->data() + k * IPV6_PREFETCH_STEP * IPV6_BINARY_LENGTH);
+            const auto * val = getIPv6FromOffset(*ipv4or6_col, k);
+            return memcmp16(val, target) <= 0;
+        }
+    });
 
-    auto range = ext::range(0, row_idx.size());
-    auto found_it = std::upper_bound(range.begin(), range.end(), target, comp);
-
-    if (found_it == range.begin())
+    if (found == 0)
         return ipNotFound();
 
-    --found_it;
     if constexpr (std::is_same_v<IPContainerType, IPv4Container>)
     {
-        for (auto idx = *found_it;; idx = parent_subnet[idx])
+        for (auto idx = found;; idx = parent_subnet[idx])
         {
+
             if (matchIPv4Subnet(target, (*ipv4or6_col)[idx], mask_column[idx]))
                 return row_idx.begin() + idx;
 
@@ -1173,7 +1234,7 @@ IPAddressDictionary::RowIdxConstIter IPAddressDictionary::lookupIP(IPValueType t
     }
     else
     {
-        for (auto idx = *found_it;; idx = parent_subnet[idx])
+        for (auto idx = found;; idx = parent_subnet[idx])
         {
             if (matchIPv6Subnet(target, getIPv6FromOffset(*ipv4or6_col, idx), mask_column[idx]))
                 return row_idx.begin() + idx;
