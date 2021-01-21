@@ -33,3 +33,5 @@ SELECT accurateCastOrNull(inf, 'UInt64');
 SELECT accurateCastOrNull(inf, 'UInt256');
 SELECT accurateCastOrNull(nan, 'UInt64');
 SELECT accurateCastOrNull(nan, 'UInt256');
+
+select accurateCastOrNull(number + 127, 'Int8') as x from numbers (2) order by x;
