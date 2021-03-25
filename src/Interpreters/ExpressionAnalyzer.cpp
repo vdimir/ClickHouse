@@ -1262,6 +1262,13 @@ ActionsDAGPtr SelectQueryExpressionAnalyzer::appendProjectResult(ExpressionActio
     }
 
     auto actions = chain.getLastActions();
+    for (const auto & result_column : result_columns)
+    {
+        const auto & column_name = result_column.first;
+        if (!aggregated_columns.contains(column_name))
+            throw Exception(
+                "Column " + backQuote(column_name) + " is not under aggregate function and not in GROUP BY", ErrorCodes::NOT_AN_AGGREGATE);
+    }
     actions->project(result_columns);
     return actions;
 }
