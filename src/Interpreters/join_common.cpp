@@ -8,6 +8,8 @@
 #include <DataTypes/getLeastSupertype.h>
 #include <DataStreams/materializeBlock.h>
 #include <IO/WriteHelpers.h>
+#include <Poco/Logger.h>
+#include <common/logger_useful.h>
 
 namespace DB
 {
@@ -119,6 +121,22 @@ void convertColumnsToNullable(Block & block, size_t starting_pos)
 {
     for (size_t i = starting_pos; i < block.columns(); ++i)
         convertColumnToNullable(block.getByPosition(i));
+}
+
+void convertColumnsToNullable(MutableColumns & mutable_columns, size_t starting_pos)
+{
+    for (size_t i = starting_pos; i < mutable_columns.size(); ++i)
+    {
+        ColumnPtr column = std::move(mutable_columns[i]);
+        column = makeNullable(column);
+        mutable_columns[i] = IColumn::mutate(std::move(column));
+
+        // changeNullability(mutable_columns[i]);
+        // mutable_columns[i]->type = convertTypeToNullable(mutable_columns[i]->type);
+
+        // convertColumnToNullable(*mutable_columns[i]);
+    }
+
 }
 
 /// @warning It assumes that every NULL has default value in nested column (or it does not matter)
@@ -329,8 +347,12 @@ void joinTotals(const Block & totals, const Block & columns_to_add, const TableJ
 
     if (Block totals_without_keys = totals)
     {
-        for (const auto & name : table_join.keyNamesRight())
-            totals_without_keys.erase(totals_without_keys.getPositionByName(name));
+        for (const auto & name_part : table_join.keyNamesRight())
+        {
+            for (const auto & name : name_part)
+                totals_without_keys.erase(totals_without_keys.getPositionByName(name));
+        }
+
 
         for (auto & col : totals_without_keys)
         {
@@ -390,23 +412,39 @@ NotJoined::NotJoined(const TableJoin & table_join, const Block & saved_block_sam
     std::vector<String> tmp;
     Block right_table_keys;
     Block sample_block_with_columns_to_add;
-    table_join.splitAdditionalColumns(right_sample_block, right_table_keys, sample_block_with_columns_to_add);
-    Block required_right_keys = table_join.getRequiredRightKeys(right_table_keys, tmp);
+    Block required_right_keys;
+
+    bool multiple_disjuncts = table_join.keyNamesRight().size() > 1;
+    if (multiple_disjuncts)
+    {
+        // required_right_keys_sources concept does not work if multiple disjuncts
+        sample_block_with_columns_to_add = right_table_keys = materializeBlock(right_sample_block);
+    }
+    else
+    {
+        table_join.splitAdditionalColumns(right_sample_block, right_table_keys, sample_block_with_columns_to_add);
+        required_right_keys = table_join.getRequiredRightKeys(right_table_keys, tmp);
+    }
 
     std::unordered_map<size_t, size_t> left_to_right_key_remap;
 
     if (table_join.hasUsing())
     {
-        for (size_t i = 0; i < table_join.keyNamesLeft().size(); ++i)
+        for (size_t p = 0; p < table_join.keyNamesLeft().size(); ++p)
         {
-            const String & left_key_name = table_join.keyNamesLeft()[i];
-            const String & right_key_name = table_join.keyNamesRight()[i];
+            for (size_t i = 0; i < table_join.keyNamesLeft()[p].size(); ++i)
+            {
+                const String & left_key_name = table_join.keyNamesLeft()[p][i];
+                const String & right_key_name = table_join.keyNamesRight()[p][i];
 
-            size_t left_key_pos = result_sample_block.getPositionByName(left_key_name);
-            size_t right_key_pos = saved_block_sample.getPositionByName(right_key_name);
+                size_t left_key_pos = result_sample_block.getPositionByName(left_key_name);
+                size_t right_key_pos = saved_block_sample.getPositionByName(right_key_name);
 
-            if (!required_right_keys.has(right_key_name))
-                left_to_right_key_remap[left_key_pos] = right_key_pos;
+                if (!required_right_keys.has(right_key_name))
+                {
+                    left_to_right_key_remap[left_key_pos] = right_key_pos;
+                }
+            }
         }
     }
 

@@ -16,6 +16,23 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
+void CollectJoinOnKeysMatcher::Data::setDisjuncts(const ASTFunction & func)
+{
+    const auto * expression_list = func.children.front()->as<ASTExpressionList>();
+    std::vector<const IAST*> v;
+    for (const auto & child : expression_list->children)
+    {
+        v.push_back(child.get());
+    }
+
+    analyzed_join.setDisjuncts(std::move(v));
+}
+
+void CollectJoinOnKeysMatcher::Data::addDisjunct(const ASTFunction & func)
+{
+    analyzed_join.addDisjunct(static_cast<const IAST*>(&func));
+}
+
 void CollectJoinOnKeysMatcher::Data::addJoinKeys(const ASTPtr & left_ast, const ASTPtr & right_ast,
                                                  const std::pair<size_t, size_t> & table_no)
 {
@@ -58,11 +75,17 @@ void CollectJoinOnKeysMatcher::Data::asofToJoinKeys()
 
 void CollectJoinOnKeysMatcher::visit(const ASTFunction & func, const ASTPtr & ast, Data & data)
 {
+    if (func.name == "or")
+    {
+        // throw Exception("JOIN ON does not support OR. Unexpected '" + queryToString(ast) + "'", ErrorCodes::NOT_IMPLEMENTED);
+        data.setDisjuncts(func);
+        return;
+    }
+
+    data.addDisjunct(func);
+
     if (func.name == "and")
         return; /// go into children
-
-    if (func.name == "or")
-        throw Exception("JOIN ON does not support OR. Unexpected '" + queryToString(ast) + "'", ErrorCodes::NOT_IMPLEMENTED);
 
     ASOF::Inequality inequality = ASOF::getInequality(func.name);
     if (func.name == "equals" || inequality != ASOF::Inequality::None)
