@@ -1,7 +1,7 @@
 #pragma once
 
 #include <DataTypes/IDataType.h>
-
+#include <DataTypes/getCommonType.h>
 
 namespace DB
 {
@@ -12,6 +12,6 @@ namespace DB
   * Examples: least common supertype for UInt8, Int8 - Int16.
   * Examples: there is no least common supertype for Array(UInt8), Int8.
   */
-DataTypePtr getLeastSupertype(const DataTypes & types);
+DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_common_type = OnNoCommonType::Throw);
 
 }

@@ -94,7 +94,7 @@ TEST_P(MostSubtypeTest, getMostSubtype)
     }
     else
     {
-        EXPECT_ANY_THROW(getMostSubtype(this->from_types, true));
+        EXPECT_ANY_THROW(getMostSubtype(this->from_types, OnNoCommonType::Throw));
     }
 }
 

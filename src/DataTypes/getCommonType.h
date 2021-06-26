@@ -1,8 +1,17 @@
-//
-// Created by Vladimir Cherkasov on 6/25/21.
-//
+#pragma once
 
-#ifndef CLICKHOUSE_GETCOMMONTYPE_H
-#define CLICKHOUSE_GETCOMMONTYPE_H
+namespace DB
+{
 
-#endif //CLICKHOUSE_GETCOMMONTYPE_H
+/// Actions performed if common type can't be infered
+enum class OnNoCommonType
+{
+    /// Throw exception
+    Throw,
+    /// Return DataTypeNothing
+    Nothing,
+    /// Return nullptr
+    Null,
+};
+
+}

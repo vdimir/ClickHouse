@@ -151,7 +151,7 @@ DataTypePtr FunctionArrayIntersect::getReturnTypeImpl(const DataTypes & argument
     DataTypePtr result_type;
 
     if (!nested_types.empty())
-        result_type = getMostSubtype(nested_types, true);
+        result_type = getMostSubtype(nested_types, OnNoCommonType::Throw);
 
     if (has_nothing)
         result_type = std::make_shared<DataTypeNothing>();
@@ -393,7 +393,7 @@ ColumnPtr FunctionArrayIntersect::executeImpl(const ColumnsWithTypeAndName & arg
     for (size_t i = 0; i < num_args; ++i)
         data_types.push_back(arguments[i].type);
 
-    auto return_type_with_nulls = getMostSubtype(data_types, true, true);
+    auto return_type_with_nulls = getMostSubtype(data_types, OnNoCommonType::Throw, true);
 
     auto casted_columns = castColumns(arguments, result_type, return_type_with_nulls);
 
