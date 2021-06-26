@@ -427,8 +427,8 @@ bool TableJoin::inferJoinKeyCommonType(const NamesAndTypesList & left, const Nam
         if (JoinCommon::typesEqualUpToNullability(ltype->second, rtype->second))
             continue;
 
-        auto common_type = to_supertype ? DB::getLeastSupertype({ltype->second, rtype->second}, OnNoCommonType::Null)
-                                        : DB::getMostSubtype({ltype->second, rtype->second}, OnNoCommonType::Null);
+        auto common_type = to_supertype ? DB::getLeastSupertype({ltype->second, rtype->second}, false)
+                                        : DB::getMostSubtype({ltype->second, rtype->second}, false);
         if (common_type == nullptr || isNothing(common_type))
         {
             LOG_DEBUG(&Poco::Logger::get("TableJoin"),

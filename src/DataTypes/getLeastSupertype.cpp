@@ -76,14 +76,12 @@ namespace
     }
 }
 
-DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_common_type)
+DataTypePtr getLeastSupertype(const DataTypes & types, bool throw_on_no_common_type)
 {
-    auto on_error = [on_no_common_type](const String & msg) -> DataTypePtr
+    auto on_error = [throw_on_no_common_type](const String & msg) -> DataTypePtr
     {
-        if (on_no_common_type == OnNoCommonType::Throw)
+        if (throw_on_no_common_type)
             throw Exception(msg, ErrorCodes::NO_COMMON_TYPE);
-        if (on_no_common_type == OnNoCommonType::Nothing)
-            return std::make_shared<DataTypeNothing>();
         return nullptr;
     };
 
@@ -118,7 +116,7 @@ DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_comm
                 non_nothing_types.emplace_back(type);
 
         if (non_nothing_types.size() < types.size())
-            return getLeastSupertype(non_nothing_types, on_no_common_type);
+            return getLeastSupertype(non_nothing_types, throw_on_no_common_type);
     }
 
     /// For Arrays
@@ -145,7 +143,7 @@ DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_comm
             if (!all_arrays)
                 return on_error(getExceptionMessagePrefix(types) + " because some of them are Array and some of them are not");
 
-            return wrapWithType<DataTypeArray>(getLeastSupertype(nested_types, on_no_common_type));
+            return wrapWithType<DataTypeArray>(getLeastSupertype(nested_types, throw_on_no_common_type));
         }
     }
 
@@ -187,7 +185,7 @@ DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_comm
 
             DataTypes common_tuple_types(tuple_size);
             for (size_t elem_idx = 0; elem_idx < tuple_size; ++elem_idx)
-                common_tuple_types[elem_idx] = getLeastSupertype(nested_types[elem_idx], on_no_common_type);
+                common_tuple_types[elem_idx] = getLeastSupertype(nested_types[elem_idx], throw_on_no_common_type);
 
             return wrapWithType<DataTypeTuple>(common_tuple_types);
         }
@@ -219,7 +217,7 @@ DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_comm
             if (!all_maps)
                 return on_error(getExceptionMessagePrefix(types) + " because some of them are Maps and some of them are not");
 
-            return wrapWithType<DataTypeMap>(getLeastSupertype(key_types, on_no_common_type), getLeastSupertype(value_types, on_no_common_type));
+            return wrapWithType<DataTypeMap>(getLeastSupertype(key_types, throw_on_no_common_type), getLeastSupertype(value_types, throw_on_no_common_type));
         }
     }
 
@@ -250,9 +248,9 @@ DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_comm
         if (have_low_cardinality)
         {
             if (have_not_low_cardinality)
-                return getLeastSupertype(nested_types, on_no_common_type);
+                return getLeastSupertype(nested_types, throw_on_no_common_type);
             else
-                return wrapWithType<DataTypeLowCardinality>(getLeastSupertype(nested_types, on_no_common_type));
+                return wrapWithType<DataTypeLowCardinality>(getLeastSupertype(nested_types, throw_on_no_common_type));
         }
     }
 
@@ -278,7 +276,7 @@ DataTypePtr getLeastSupertype(const DataTypes & types, OnNoCommonType on_no_comm
 
         if (have_nullable)
         {
-            return wrapWithType<DataTypeNullable>(getLeastSupertype(nested_types, on_no_common_type));
+            return wrapWithType<DataTypeNullable>(getLeastSupertype(nested_types, throw_on_no_common_type));
         }
     }
 

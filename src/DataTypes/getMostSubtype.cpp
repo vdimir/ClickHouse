@@ -44,29 +44,27 @@ String getExceptionMessage(const DataTypes & types, const std::string & reason)
 
 }
 
-DataTypePtr getMostSubtype(const DataTypes & types, OnNoCommonType on_no_common_type, bool force_support_conversion)
+DataTypePtr getMostSubtype(const DataTypes & types, bool throw_on_no_common_type, bool force_support_conversion)
 {
-    auto get_nothing_or_throw = [on_no_common_type, & types](const std::string & reason) -> DataTypePtr
+    auto get_nothing_or_throw = [throw_on_no_common_type, & types](const std::string & reason) -> DataTypePtr
     {
-        if (on_no_common_type == OnNoCommonType::Throw)
+        if (throw_on_no_common_type)
             throw Exception(getExceptionMessage(types, reason), ErrorCodes::NO_COMMON_TYPE);
-        if (on_no_common_type == OnNoCommonType::Nothing)
-            return std::make_shared<DataTypeNothing>();
-        return nullptr;
+        return std::make_shared<DataTypeNothing>();
     };
 
     /// Trivial cases
 
     if (types.empty())
     {
-        if (on_no_common_type == OnNoCommonType::Throw)
+        if (throw_on_no_common_type)
             throw Exception("There is no common type for empty type list", ErrorCodes::NO_COMMON_TYPE);
         return std::make_shared<DataTypeNothing>();
     }
 
     if (types.size() == 1)
     {
-        if (on_no_common_type == OnNoCommonType::Throw && typeid_cast<const DataTypeNothing *>(types[0].get()))
+        if (throw_on_no_common_type && typeid_cast<const DataTypeNothing *>(types[0].get()))
             throw Exception("There is no common type for type Nothing", ErrorCodes::NO_COMMON_TYPE);
         return types[0];
     }
@@ -120,7 +118,7 @@ DataTypePtr getMostSubtype(const DataTypes & types, OnNoCommonType on_no_common_
             if (!all_arrays)
                 return get_nothing_or_throw(" because some of them are Array and some of them are not");
 
-            return std::make_shared<DataTypeArray>(getMostSubtype(nested_types, on_no_common_type, force_support_conversion));
+            return std::make_shared<DataTypeArray>(getMostSubtype(nested_types, throw_on_no_common_type, force_support_conversion));
         }
     }
 
@@ -163,7 +161,7 @@ DataTypePtr getMostSubtype(const DataTypes & types, OnNoCommonType on_no_common_
             DataTypes common_tuple_types(tuple_size);
             for (size_t elem_idx = 0; elem_idx < tuple_size; ++elem_idx)
                 common_tuple_types[elem_idx] =
-                        getMostSubtype(nested_types[elem_idx], on_no_common_type, force_support_conversion);
+                        getMostSubtype(nested_types[elem_idx], throw_on_no_common_type, force_support_conversion);
 
             return std::make_shared<DataTypeTuple>(common_tuple_types);
         }
@@ -194,9 +192,9 @@ DataTypePtr getMostSubtype(const DataTypes & types, OnNoCommonType on_no_common_
         if (have_nullable)
         {
             if (all_nullable || force_support_conversion)
-                return std::make_shared<DataTypeNullable>(getMostSubtype(nested_types, on_no_common_type, force_support_conversion));
+                return std::make_shared<DataTypeNullable>(getMostSubtype(nested_types, throw_on_no_common_type, force_support_conversion));
 
-            return getMostSubtype(nested_types, on_no_common_type, force_support_conversion);
+            return getMostSubtype(nested_types, throw_on_no_common_type, force_support_conversion);
         }
     }
 

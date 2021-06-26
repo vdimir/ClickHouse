@@ -1,7 +1,6 @@
 #pragma once
 
 #include <DataTypes/IDataType.h>
-#include <DataTypes/getCommonType.h>
 
 
 namespace DB
@@ -16,6 +15,6 @@ namespace DB
   * Example: most common subtype for Array(UInt8) and Array(Nullable(Int32)) is Array(Nullable(UInt8)) if force_support_conversion is true.
   */
 DataTypePtr
-getMostSubtype(const DataTypes & types, OnNoCommonType on_no_common_type = OnNoCommonType::Nothing, bool force_support_conversion = false);
+getMostSubtype(const DataTypes & types, bool throw_on_no_common_type = true, bool force_support_conversion = false);
 
 }
