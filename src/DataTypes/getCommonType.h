@@ -1,0 +1,8 @@
+//
+// Created by Vladimir Cherkasov on 6/25/21.
+//
+
+#ifndef CLICKHOUSE_GETCOMMONTYPE_H
+#define CLICKHOUSE_GETCOMMONTYPE_H
+
+#endif //CLICKHOUSE_GETCOMMONTYPE_H
