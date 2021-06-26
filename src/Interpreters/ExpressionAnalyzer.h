@@ -91,7 +91,7 @@ private:
         const bool use_index_for_in_with_subqueries;
         const SizeLimits size_limits_for_set;
 
-        ExtractedSettings(const Settings & settings_);
+        explicit ExtractedSettings(const Settings & settings_);
     };
 
 public:
