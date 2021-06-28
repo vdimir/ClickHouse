@@ -150,6 +150,9 @@ ExpressionAnalyzer::ExpressionAnalyzer(
     /// Replaces global subqueries with the generated names of temporary tables that will be sent to remote servers.
     initGlobalSubqueriesAndExternalTables(do_global);
 
+    auto temp_actions = std::make_shared<ActionsDAG>(sourceColumns());
+    columns_after_array_join = getColumnsAfterArrayJoin(temp_actions, sourceColumns());
+    columns_after_join = analyzeJoin(temp_actions, columns_after_array_join);
     /// has_aggregation, aggregation_keys, aggregate_descriptions, aggregated_columns.
     /// This analysis should be performed after processing global subqueries, because otherwise,
     /// if the aggregate function contains a global subquery, then `analyzeAggregation` method will save
@@ -157,11 +160,67 @@ ExpressionAnalyzer::ExpressionAnalyzer(
     /// global subquery. Then, when you call `initGlobalSubqueriesAndExternalTables` method, this
     /// the global subquery will be replaced with a temporary table, resulting in aggregate_descriptions
     /// will contain out-of-date information, which will lead to an error when the query is executed.
-    analyzeAggregation();
+    analyzeAggregation(temp_actions);
 }
 
+NamesAndTypesList ExpressionAnalyzer::getColumnsAfterArrayJoin(ActionsDAGPtr & actions, const NamesAndTypesList & src_columns)
+{
+    const auto * select_query = query->as<ASTSelectQuery>();
+    if (!select_query)
+        return {};
 
-void ExpressionAnalyzer::analyzeAggregation()
+    auto [array_join_expression_list, is_array_join_left] = select_query->arrayJoinExpressionList();
+
+    if (!array_join_expression_list)
+        return src_columns;
+
+    getRootActionsNoMakeSet(array_join_expression_list, true, actions, false);
+
+    auto array_join = addMultipleArrayJoinAction(actions, is_array_join_left);
+    auto sample_columns = actions->getResultColumns();
+    array_join->prepare(sample_columns);
+    actions = std::make_shared<ActionsDAG>(sample_columns);
+
+    NamesAndTypesList new_columns_after_array_join;
+    NameSet added_columns;
+
+    for (auto & column : actions->getResultColumns())
+    {
+        if (syntax->array_join_result_to_source.count(column.name))
+        {
+            new_columns_after_array_join.emplace_back(column.name, column.type);
+            added_columns.emplace(column.name);
+        }
+    }
+
+    for (const auto & column : src_columns)
+        if (added_columns.count(column.name) == 0)
+            new_columns_after_array_join.emplace_back(column.name, column.type);
+
+    return new_columns_after_array_join;
+}
+
+NamesAndTypesList ExpressionAnalyzer::analyzeJoin(ActionsDAGPtr & actions, const NamesAndTypesList & src_columns)
+{
+    const auto * select_query = query->as<ASTSelectQuery>();
+    if (!select_query)
+        return {};
+
+    const ASTTablesInSelectQueryElement * join = select_query->join();
+    if (join)
+    {
+        getRootActionsNoMakeSet(analyzedJoin().leftKeysList(), true, actions, false);
+        auto sample_columns = actions->getResultColumns();
+        analyzedJoin().addJoinedColumnsAndCorrectTypes(sample_columns);
+        actions = std::make_shared<ActionsDAG>(sample_columns);
+    }
+
+    NamesAndTypesList result_columns = src_columns;
+    analyzedJoin().addJoinedColumnsAndCorrectTypes(result_columns, false);
+    return result_columns;
+}
+
+void ExpressionAnalyzer::analyzeAggregation(ActionsDAGPtr & temp_actions)
 {
     /** Find aggregation keys (aggregation_keys), information about aggregate functions (aggregate_descriptions),
      *  as well as a set of columns obtained after the aggregation, if any,
@@ -172,116 +231,67 @@ void ExpressionAnalyzer::analyzeAggregation()
 
     auto * select_query = query->as<ASTSelectQuery>();
 
-    auto temp_actions = std::make_shared<ActionsDAG>(sourceColumns());
+    makeAggregateDescriptions(temp_actions, aggregate_descriptions);
+    has_aggregation = !aggregate_descriptions.empty() || (select_query && (select_query->groupBy() || select_query->having()));
 
+    if (!has_aggregation)
+    {
+        aggregated_columns = temp_actions->getNamesAndTypesList();
+        return;
+    }
+
+    /// Find out aggregation keys.
     if (select_query)
     {
-        NamesAndTypesList array_join_columns;
-        columns_after_array_join = sourceColumns();
-
-        bool is_array_join_left;
-        if (ASTPtr array_join_expression_list = select_query->arrayJoinExpressionList(is_array_join_left))
+        if (ASTPtr group_by_ast = select_query->groupBy())
         {
-            getRootActionsNoMakeSet(array_join_expression_list, true, temp_actions, false);
-
-            auto array_join = addMultipleArrayJoinAction(temp_actions, is_array_join_left);
-            auto sample_columns = temp_actions->getResultColumns();
-            array_join->prepare(sample_columns);
-            temp_actions = std::make_shared<ActionsDAG>(sample_columns);
-
-            NamesAndTypesList new_columns_after_array_join;
-            NameSet added_columns;
-
-            for (auto & column : temp_actions->getResultColumns())
+            NameSet unique_keys;
+            ASTs & group_asts = group_by_ast->children;
+            for (ssize_t i = 0; i < ssize_t(group_asts.size()); ++i)
             {
-                if (syntax->array_join_result_to_source.count(column.name))
+                ssize_t size = group_asts.size();
+                getRootActionsNoMakeSet(group_asts[i], true, temp_actions, false);
+
+                const auto & column_name = group_asts[i]->getColumnName(getContext()->getSettingsRef());
+                const auto * node = temp_actions->tryFindInIndex(column_name);
+                if (!node)
+                    throw Exception("Unknown identifier (in GROUP BY): " + column_name, ErrorCodes::UNKNOWN_IDENTIFIER);
+
+                /// Constant expressions have non-null column pointer at this stage.
+                if (node->column && isColumnConst(*node->column))
                 {
-                    new_columns_after_array_join.emplace_back(column.name, column.type);
-                    added_columns.emplace(column.name);
+                    select_query->group_by_with_constant_keys = true;
+
+                    /// But don't remove last key column if no aggregate functions, otherwise aggregation will not work.
+                    if (!aggregate_descriptions.empty() || size > 1)
+                    {
+                        if (i + 1 < static_cast<ssize_t>(size))
+                            group_asts[i] = std::move(group_asts.back());
+
+                        group_asts.pop_back();
+
+                        --i;
+                        continue;
+                    }
+                }
+
+                NameAndTypePair key{column_name, node->result_type};
+
+                /// Aggregation keys are uniqued.
+                if (!unique_keys.count(key.name))
+                {
+                    unique_keys.insert(key.name);
+                    aggregation_keys.push_back(key);
+
+                    /// Key is no longer needed, therefore we can save a little by moving it.
+                    aggregated_columns.push_back(std::move(key));
                 }
             }
 
-            for (auto & column : columns_after_array_join)
-                if (added_columns.count(column.name) == 0)
-                    new_columns_after_array_join.emplace_back(column.name, column.type);
-
-            columns_after_array_join.swap(new_columns_after_array_join);
-        }
-
-        columns_after_array_join.insert(columns_after_array_join.end(), array_join_columns.begin(), array_join_columns.end());
-
-        const ASTTablesInSelectQueryElement * join = select_query->join();
-        if (join)
-        {
-            getRootActionsNoMakeSet(analyzedJoin().leftKeysList(), true, temp_actions, false);
-            auto sample_columns = temp_actions->getResultColumns();
-            analyzedJoin().addJoinedColumnsAndCorrectTypes(sample_columns);
-            temp_actions = std::make_shared<ActionsDAG>(sample_columns);
-        }
-
-        columns_after_join = columns_after_array_join;
-        analyzedJoin().addJoinedColumnsAndCorrectTypes(columns_after_join, false);
-    }
-
-    has_aggregation = makeAggregateDescriptions(temp_actions);
-    if (select_query && (select_query->groupBy() || select_query->having()))
-        has_aggregation = true;
-
-    if (has_aggregation)
-    {
-        /// Find out aggregation keys.
-        if (select_query)
-        {
-            if (select_query->groupBy())
+            if (group_asts.empty())
             {
-                NameSet unique_keys;
-                ASTs & group_asts = select_query->groupBy()->children;
-                for (ssize_t i = 0; i < ssize_t(group_asts.size()); ++i)
-                {
-                    ssize_t size = group_asts.size();
-                    getRootActionsNoMakeSet(group_asts[i], true, temp_actions, false);
-
-                    const auto & column_name = group_asts[i]->getColumnName(getContext()->getSettingsRef());
-                    const auto * node = temp_actions->tryFindInIndex(column_name);
-                    if (!node)
-                        throw Exception("Unknown identifier (in GROUP BY): " + column_name, ErrorCodes::UNKNOWN_IDENTIFIER);
-
-                    /// Constant expressions have non-null column pointer at this stage.
-                    if (node->column && isColumnConst(*node->column))
-                    {
-                        select_query->group_by_with_constant_keys = true;
-
-                        /// But don't remove last key column if no aggregate functions, otherwise aggregation will not work.
-                        if (!aggregate_descriptions.empty() || size > 1)
-                        {
-                            if (i + 1 < static_cast<ssize_t>(size))
-                                group_asts[i] = std::move(group_asts.back());
-
-                            group_asts.pop_back();
-
-                            --i;
-                            continue;
-                        }
-                    }
-
-                    NameAndTypePair key{column_name, node->result_type};
-
-                    /// Aggregation keys are uniqued.
-                    if (!unique_keys.count(key.name))
-                    {
-                        unique_keys.insert(key.name);
-                        aggregation_keys.push_back(key);
-
-                        /// Key is no longer needed, therefore we can save a little by moving it.
-                        aggregated_columns.push_back(std::move(key));
-                    }
-                }
-
-                if (group_asts.empty())
-                {
-                    select_query->setExpression(ASTSelectQuery::Expression::GROUP_BY, {});
-                    has_aggregation = select_query->having() || !aggregate_descriptions.empty();
-                }
+                select_query->setExpression(ASTSelectQuery::Expression::GROUP_BY, {});
+                has_aggregation = select_query->having() || !aggregate_descriptions.empty();
             }
         }
         else
@@ -296,9 +306,10 @@ void ExpressionAnalyzer::analyzeAggregation()
             aggregated_columns.emplace_back(desc.column_name, desc.function->getReturnType());
     }
     else
-    {
         aggregated_columns = temp_actions->getNamesAndTypesList();
-    }
+
+    for (const auto & desc : aggregate_descriptions)
+        aggregated_columns.emplace_back(desc.column_name, desc.function->getReturnType());
 }
 
 
@@ -442,7 +453,7 @@ void ExpressionAnalyzer::getRootActionsForHaving(const ASTPtr & ast, bool no_sub
 }
 
 
-bool ExpressionAnalyzer::makeAggregateDescriptions(ActionsDAGPtr & actions)
+void ExpressionAnalyzer::makeAggregateDescriptions(ActionsDAGPtr & actions, AggregateDescriptions & descriptions)
 {
     for (const ASTFunction * node : aggregates())
     {
@@ -475,10 +486,8 @@ bool ExpressionAnalyzer::makeAggregateDescriptions(ActionsDAGPtr & actions)
         aggregate.parameters = (node->parameters) ? getAggregateFunctionParametersArray(node->parameters, "", getContext()) : Array();
         aggregate.function = AggregateFunctionFactory::instance().get(node->name, types, aggregate.parameters, properties);
 
-        aggregate_descriptions.push_back(aggregate);
+        descriptions.push_back(aggregate);
     }
-
-    return !aggregates().empty();
 }
 
 void makeWindowDescriptionFromAST(const Context & context,
