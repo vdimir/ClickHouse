@@ -797,7 +797,7 @@ ExpressionActionsChain::JoinStep::JoinStep(
     for (const auto & column : result_columns)
         required_columns.emplace_back(column.name, column.type);
 
-    analyzed_join->addJoinedColumnsAndCorrectTypes(result_columns);
+    analyzed_join->addJoinedColumnsAndCorrectTypes(result_columns, true);
 }
 
 void ExpressionActionsChain::JoinStep::finalize(const NameSet & required_output_)
