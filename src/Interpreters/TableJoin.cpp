@@ -73,8 +73,6 @@ void TableJoin::resetCollected()
     renames.clear();
     left_type_map.clear();
     right_type_map.clear();
-    left_converting_actions = nullptr;
-    right_converting_actions = nullptr;
 }
 
 void TableJoin::addUsingKey(const ASTPtr & ast)
@@ -413,15 +411,15 @@ bool TableJoin::tryInitDictJoin(const Block & sample_block, ContextPtr context)
     return true;
 }
 
-bool TableJoin::createConvertingActions(const ColumnsWithTypeAndName & left_sample_columns, const ColumnsWithTypeAndName & right_sample_columns)
+std::pair<ActionsDAGPtr, ActionsDAGPtr>
+TableJoin::createConvertingActions(const ColumnsWithTypeAndName & left_sample_columns, const ColumnsWithTypeAndName & right_sample_columns)
 {
-    bool need_convert = false;
-    need_convert = inferJoinKeyCommonType(left_sample_columns, right_sample_columns, !isSpecialStorage());
+    inferJoinKeyCommonType(left_sample_columns, right_sample_columns, !isSpecialStorage());
 
-    left_converting_actions = applyKeyConvertToTable(left_sample_columns, left_type_map, key_names_left);
-    right_converting_actions = applyKeyConvertToTable(right_sample_columns, right_type_map, key_names_right);
+    auto left_converting_actions = applyKeyConvertToTable(left_sample_columns, left_type_map, key_names_left);
+    auto right_converting_actions = applyKeyConvertToTable(right_sample_columns, right_type_map, key_names_right);
 
-    return need_convert;
+    return {left_converting_actions, right_converting_actions};
 }
 
 template <typename LeftNamesAndTypes, typename RightNamesAndTypes>
@@ -518,7 +516,6 @@ ActionsDAGPtr TableJoin::applyKeyConvertToTable(
     return dag;
 }
 
-
 void TableJoin::setStorageJoin(std::shared_ptr<StorageJoin> storage)
 {
     if (right_storage_dictionary)
@@ -533,26 +530,11 @@ void TableJoin::setStorageJoin(std::shared_ptr<StorageDictionary> storage)
     right_storage_dictionary = storage;
 }
 
-std::shared_ptr<StorageJoin> TableJoin::getStorageJoin()
-{
-    return right_storage_join;
-}
-
 String TableJoin::renamedRightColumnName(const String & name) const
 {
     if (const auto it = renames.find(name); it != renames.end())
         return it->second;
     return name;
-}
-
-bool TableJoin::isSpecialStorage() const
-{
-    return right_storage_dictionary || right_storage_join;
-}
-
-const DictionaryReader * TableJoin::getDictionaryReader() const
-{
-    return dictionary_reader.get();
 }
 
 }
