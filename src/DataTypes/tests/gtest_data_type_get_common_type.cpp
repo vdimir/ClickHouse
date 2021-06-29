@@ -76,11 +76,11 @@ TEST_P(LeastSuperTypeTest, getLeastSupertype)
 {
     if (this->expected_type)
     {
-        ASSERT_EQ(*this->expected_type, *getLeastSupertype(this->from_types));
+        ASSERT_EQ(*this->expected_type, *getLeastSupertype(this->from_types, false));
     }
     else
     {
-        EXPECT_ANY_THROW(getLeastSupertype(this->from_types));
+        EXPECT_ANY_THROW(getLeastSupertype(this->from_types, true));
     }
 }
 
@@ -90,7 +90,7 @@ TEST_P(MostSubtypeTest, getMostSubtype)
 {
     if (this->expected_type)
     {
-        ASSERT_EQ(*this->expected_type, *getMostSubtype(this->from_types));
+        ASSERT_EQ(*this->expected_type, *getMostSubtype(this->from_types, false));
     }
     else
     {
