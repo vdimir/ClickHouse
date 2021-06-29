@@ -24,6 +24,8 @@ class ASTSelectQuery;
 struct DatabaseAndTableWithAlias;
 class Block;
 class DictionaryReader;
+class StorageJoin;
+class StorageDictionary;
 
 struct ColumnWithTypeAndName;
 using ColumnsWithTypeAndName = std::vector<ColumnWithTypeAndName>;
@@ -95,6 +97,11 @@ private:
 
     VolumePtr tmp_volume;
 
+    std::shared_ptr<StorageJoin> right_storage_join;
+
+    std::shared_ptr<StorageDictionary> right_storage_dictionary;
+    std::shared_ptr<DictionaryReader> dictionary_reader;
+
     Names requiredJoinedNames() const;
 
     /// Create converting actions and change key column names if required
@@ -124,16 +131,12 @@ public:
         table_join.strictness = strictness;
     }
 
-    StoragePtr joined_storage;
-    std::shared_ptr<DictionaryReader> dictionary_reader;
-
     ASTTableJoin::Kind kind() const { return table_join.kind; }
     ASTTableJoin::Strictness strictness() const { return table_join.strictness; }
     bool sameStrictnessAndKind(ASTTableJoin::Strictness, ASTTableJoin::Kind) const;
     const SizeLimits & sizeLimits() const { return size_limits; }
     VolumePtr getTemporaryVolume() { return tmp_volume; }
     bool allowMergeJoin() const;
-    bool allowDictJoin(const String & dict_key, const Block & sample_block, Names &, NamesAndTypesList &) const;
     bool preferMergeJoin() const { return join_algorithm == JoinAlgorithm::PREFER_PARTIAL_MERGE; }
     bool forceMergeJoin() const { return join_algorithm == JoinAlgorithm::PARTIAL_MERGE; }
     bool forceHashJoin() const
@@ -209,6 +212,16 @@ public:
     Block getRequiredRightKeys(const Block & right_table_keys, std::vector<String> & keys_sources) const;
 
     String renamedRightColumnName(const String & name) const;
+
+    void setStorageJoin(std::shared_ptr<StorageJoin> storage);
+    void setStorageJoin(std::shared_ptr<StorageDictionary> storage);
+
+    std::shared_ptr<StorageJoin> getStorageJoin();
+
+    bool tryInitDictJoin(const Block & sample_block, ContextPtr context);
+
+    bool isSpecialStorage() const;
+    const DictionaryReader * getDictionaryReader() const;
 };
 
 }
