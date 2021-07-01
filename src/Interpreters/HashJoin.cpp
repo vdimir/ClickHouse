@@ -53,6 +53,52 @@ struct NotProcessedCrossJoin : public ExtraBlock
     size_t right_block;
 };
 
+/// Debug methods
+std::string joinPropertyToString(HashJoin::Type which)
+{
+    switch (which)
+    {
+        case HashJoin::Type::EMPTY:   return "EMPTY";
+        case HashJoin::Type::CROSS:   return "CROSS";
+        case HashJoin::Type::DICT:    return "DICT";
+
+    #define M(NAME) \
+        case HashJoin::Type::NAME: return #NAME;
+        APPLY_FOR_JOIN_VARIANTS(M)
+    #undef M
+    }
+    return "Unknown" + std::to_string(static_cast<int>(which));
+}
+
+std::string joinPropertyToString(ASTTableJoin::Kind kind)
+{
+    switch (kind)
+    {
+        case ASTTableJoin::Kind::Left:  return "Left";
+        case ASTTableJoin::Kind::Inner: return "Inner";
+        case ASTTableJoin::Kind::Full:  return "Full";
+        case ASTTableJoin::Kind::Right: return "Right";
+        case ASTTableJoin::Kind::Cross: return "Cross";
+        case ASTTableJoin::Kind::Comma: return "Comma";
+    }
+    return "Unknown" + std::to_string(static_cast<int>(kind));
+}
+
+std::string joinPropertyToString(ASTTableJoin::Strictness strictness)
+{
+    switch (strictness)
+    {
+        case ASTTableJoin::Strictness::RightAny:    return "RightAny";
+        case ASTTableJoin::Strictness::Any:         return "Any";
+        case ASTTableJoin::Strictness::All:         return "All";
+        case ASTTableJoin::Strictness::Asof:        return "Asof";
+        case ASTTableJoin::Strictness::Semi:        return "Semi";
+        case ASTTableJoin::Strictness::Anti:        return "Anti";
+        case ASTTableJoin::Strictness::Unspecified: return "Unspecified";
+    }
+    return "Unknown" + std::to_string(static_cast<int>(strictness));
+}
+
 }
 
 namespace JoinStuff
@@ -188,6 +234,7 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
     , right_sample_block(right_sample_block_)
     , log(&Poco::Logger::get("HashJoin"))
 {
+    LOG_DEBUG(log, "Joining on keys: [{}], [{}]", fmt::join(table_join->keyNamesLeft(), ", "), fmt::join(key_names_right, ", "));
     LOG_DEBUG(log, "Right sample block: {}", right_sample_block.dumpStructure());
 
     table_join->splitAdditionalColumns(right_sample_block, right_table_keys, sample_block_with_columns_to_add);
@@ -204,7 +251,6 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
 
     if (table_join->dictionary_reader)
     {
-        LOG_DEBUG(log, "Performing join over dict");
         data->type = Type::DICT;
         std::get<MapsOne>(data->maps).create(Type::DICT);
         chooseMethod(key_columns, key_sizes); /// init key_sizes
@@ -238,6 +284,8 @@ HashJoin::HashJoin(std::shared_ptr<TableJoin> table_join_, const Block & right_s
         /// Choose data structure to use for JOIN.
         init(chooseMethod(key_columns, key_sizes));
     }
+    LOG_DEBUG(log, "Join type: {}, kind: {}, strictness: {}",
+              joinPropertyToString(data->type), joinPropertyToString(kind), joinPropertyToString(strictness));
 }
 
 HashJoin::Type HashJoin::chooseMethod(const ColumnRawPtrs & key_columns, Sizes & key_sizes)
@@ -1362,7 +1410,7 @@ void HashJoin::joinBlock(Block & block, ExtraBlockPtr & not_processed)
     {
         /// Joined
     }
-    else if (kind == ASTTableJoin::Kind::Cross)
+    else if (kind == ASTTableJoin::Kind::Cross || kind == ASTTableJoin::Kind::Comma)
         joinBlockImplCross(block, not_processed);
     else
         throw Exception("Logical error: unknown combination of JOIN", ErrorCodes::LOGICAL_ERROR);

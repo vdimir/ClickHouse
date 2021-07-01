@@ -37,6 +37,18 @@ TableJoin::TableJoin(const Settings & settings, VolumePtr tmp_volume_)
 {
 }
 
+void TableJoin::resetKeys()
+{
+    key_names_left.clear();
+    key_names_right.clear();
+    key_asts_left.clear();
+    key_asts_right.clear();
+    left_type_map.clear();
+    right_type_map.clear();
+    left_converting_actions = nullptr;
+    right_converting_actions = nullptr;
+}
+
 void TableJoin::resetCollected()
 {
     key_names_left.clear();
@@ -472,6 +484,12 @@ String TableJoin::renamedRightColumnName(const String & name) const
     if (const auto it = renames.find(name); it != renames.end())
         return it->second;
     return name;
+}
+
+void TableJoin::resetToCross()
+{
+    this->resetKeys();
+    this->table_join.kind = ASTTableJoin::Kind::Cross;
 }
 
 }

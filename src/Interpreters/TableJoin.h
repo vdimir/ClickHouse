@@ -35,7 +35,6 @@ using VolumePtr = std::shared_ptr<IVolume>;
 
 class TableJoin
 {
-
 public:
     using NameToTypeMap = std::unordered_map<String, DataTypePtr>;
 
@@ -99,6 +98,8 @@ private:
     /// Create converting actions and change key column names if required
     ActionsDAGPtr applyKeyConvertToTable(
         const ColumnsWithTypeAndName & cols_src, const NameToTypeMap & type_mapping, Names & names_to_rename) const;
+
+    void resetKeys();
 
 public:
     TableJoin() = default;
@@ -206,6 +207,8 @@ public:
     Block getRequiredRightKeys(const Block & right_table_keys, std::vector<String> & keys_sources) const;
 
     String renamedRightColumnName(const String & name) const;
+
+    void resetToCross();
 };
 
 }

@@ -20,6 +20,7 @@
 #include <Interpreters/getTableExpressions.h>
 #include <Interpreters/TreeOptimizer.h>
 #include <Interpreters/replaceAliasColumnsInQuery.h>
+#include <Interpreters/evaluateConstantExpression.h>
 
 #include <Parsers/ASTExpressionList.h>
 #include <Parsers/ASTFunction.h>
@@ -30,6 +31,8 @@
 
 #include <DataTypes/NestedUtils.h>
 #include <DataTypes/DataTypeNullable.h>
+#include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypesNumber.h>
 
 #include <IO/WriteHelpers.h>
 #include <IO/WriteBufferFromOStream.h>
@@ -509,15 +512,46 @@ void setJoinStrictness(ASTSelectQuery & select_query, JoinStrictness join_defaul
     out_table_join = table_join;
 }
 
+/// Evaluate expression and return boolean value if it can be interpreted as bool.
+/// Only UInt8 or NULL are allowed.
+/// Returns `false` for 0 or NULL values, `true` for any non-negative value.
+std::optional<bool> tryEvaluateConstCondition(ASTPtr expr, ContextPtr context)
+{
+    if (!expr)
+        return {};
+
+    Field eval_res;
+    DataTypePtr eval_res_type;
+    try
+    {
+        std::tie(eval_res, eval_res_type) = evaluateConstantExpression(expr, context);
+    }
+    catch (DB::Exception &)
+    {
+        /// not a constant expression
+        return {};
+    }
+    /// UInt8, maybe Nullable, maybe LowCardinality, and NULL are allowed
+    eval_res_type = removeNullable(removeLowCardinality(eval_res_type));
+    if (auto which = WhichDataType(eval_res_type); !which.isUInt8() && !which.isNothing())
+        return {};
+
+    if (eval_res.isNull())
+        return false;
+
+    UInt8 res = eval_res.template safeGet<UInt8>();
+    return res > 0;
+}
+
 /// Find the columns that are obtained by JOIN.
-void collectJoinedColumns(TableJoin & analyzed_join, const ASTSelectQuery & select_query,
-                          const TablesWithColumns & tables, const Aliases & aliases)
+void collectJoinedColumns(TableJoin & analyzed_join, ASTSelectQuery & select_query,
+                          const TablesWithColumns & tables, const Aliases & aliases, ContextPtr context)
 {
     const ASTTablesInSelectQueryElement * node = select_query.join();
     if (!node || tables.size() < 2)
         return;
 
-    const auto & table_join = node->table_join->as<ASTTableJoin &>();
+    auto & table_join = node->table_join->as<ASTTableJoin &>();
 
     if (table_join.using_expression_list)
     {
@@ -539,8 +573,21 @@ void collectJoinedColumns(TableJoin & analyzed_join, const ASTSelectQuery & sele
         CollectJoinOnKeysVisitor::Data data{analyzed_join, tables[0], tables[1], aliases, is_asof};
         CollectJoinOnKeysVisitor(data).visit(table_join.on_expression);
         if (!data.has_some)
-            throw Exception("Cannot get JOIN keys from JOIN ON section: " + queryToString(table_join.on_expression),
-                            ErrorCodes::INVALID_JOIN_ON_EXPRESSION);
+        {
+            bool join_on_value;
+            if (auto eval_const_res = tryEvaluateConstCondition(table_join.on_expression, context))
+                join_on_value = *eval_const_res;
+            else
+                throw Exception("Cannot get JOIN keys from JOIN ON section: " + queryToString(table_join.on_expression),
+                                ErrorCodes::INVALID_JOIN_ON_EXPRESSION);
+
+            table_join.on_expression = nullptr;
+            if (join_on_value)
+                analyzed_join.resetToCross();
+            else
+                throw Exception("JOIN ON falsy expression not implemented", ErrorCodes::NOT_IMPLEMENTED);
+        }
+
         if (is_asof)
             data.asofToJoinKeys();
     }
@@ -932,7 +979,7 @@ TreeRewriterResultPtr TreeRewriter::analyzeSelect(
     setJoinStrictness(
         *select_query, settings.join_default_strictness, settings.any_join_distinct_right_table_keys, result.analyzed_join->table_join);
 
-    collectJoinedColumns(*result.analyzed_join, *select_query, tables_with_columns, result.aliases);
+    collectJoinedColumns(*result.analyzed_join, *select_query, tables_with_columns, result.aliases, getContext());
 
     result.aggregates = getAggregates(query, *select_query);
     result.window_function_asts = getWindowFunctions(query, *select_query);
