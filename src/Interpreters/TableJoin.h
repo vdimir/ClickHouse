@@ -107,7 +107,7 @@ private:
 
     /// Calculates common supertypes for corresponding join key columns.
     template <typename LeftNamesAndTypes, typename RightNamesAndTypes>
-    bool inferJoinKeyCommonType(const LeftNamesAndTypes & left, const RightNamesAndTypes & right, bool to_supertype);
+    bool inferJoinKeyCommonType(const LeftNamesAndTypes & left, const RightNamesAndTypes & right, bool allow_right);
 
     NamesAndTypesList correctedColumnsAddedByJoin() const;
 
