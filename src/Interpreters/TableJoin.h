@@ -67,7 +67,7 @@ private:
 
     NamesVector key_names_left;
     NamesVector key_names_right; /// Duplicating names are qualified.
-private:
+
     size_t disjunct_num = 0;
     std::vector<const IAST*> disjuncts;
 

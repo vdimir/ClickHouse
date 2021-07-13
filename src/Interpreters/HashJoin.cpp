@@ -1097,7 +1097,14 @@ void setUsed(IColumn::Filter & filter [[maybe_unused]], size_t pos [[maybe_unuse
 
 /// Joins right table columns which indexes are present in right_indexes using specified map.
 /// Makes filter (1 if row presented in right table) and returns offsets to replicate (for ALL JOINS).
-template <ASTTableJoin::Kind KIND, ASTTableJoin::Strictness STRICTNESS, typename KeyGetter, typename Map, bool need_filter, bool has_null_map, bool multiple_disjuncts>
+template <
+    ASTTableJoin::Kind KIND,
+    ASTTableJoin::Strictness STRICTNESS,
+    typename KeyGetter,
+    typename Map,
+    bool need_filter,
+    bool has_null_map,
+    bool multiple_disjuncts>
 NO_INLINE IColumn::Filter joinRightColumns(
     std::vector<KeyGetter> && key_getter_vector,
     const std::vector<const Map *> & mapv,
@@ -1117,15 +1124,10 @@ NO_INLINE IColumn::Filter joinRightColumns(
     if constexpr (jf.need_replication)
         added_columns.offsets_to_replicate = std::make_unique<IColumn::Offsets>(rows);
 
-    size_t disjunct_num = added_columns.key_columns.size();
+    size_t total_disjuncts = added_columns.key_columns.size();
 
-    // std::vector<KeyGetter> key_getter_vector;
-
-    // for (size_t d = 0; d < disjunct_num; ++d)
-    // {
-    //     auto key_getter = createKeyGetter<KeyGetter, jf.is_asof_join>(added_columns.key_columns[d], added_columns.key_sizes[d]);
-    //     key_getter_vector.push_back(std::move(key_getter));
-    // }
+    if constexpr (multiple_disjuncts)
+        assert(total_disjuncts == 1);
 
     IColumn::Offset current_offset = 0;
 
@@ -1135,12 +1137,12 @@ NO_INLINE IColumn::Filter joinRightColumns(
         bool null_element_found = false;
 
         KnownRowsHolder<multiple_disjuncts> known_rows;
-        size_t d = 0;
-        do
+
+        for (size_t disjunct_idx = 0; disjunct_idx < total_disjuncts; ++disjunct_idx)
         {
             if constexpr (has_null_map)
             {
-                if (null_map[d] && (*null_map[d])[i])
+                if (null_map[disjunct_idx] && (*null_map[disjunct_idx])[i])
                 {
                     null_element_found = true;
                     continue;
@@ -1149,7 +1151,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
 
             // consider skip if any join and the row is already in filter (via setUsed)
 
-            auto find_result = key_getter_vector[d].findKey(*(mapv[d]), i, pool);
+            auto find_result = key_getter_vector[disjunct_idx].findKey(*(mapv[disjunct_idx]), i, pool);
 
             if (find_result.isFound())
             {
@@ -1220,14 +1222,13 @@ NO_INLINE IColumn::Filter joinRightColumns(
                         block_with_flags->flags[mapped.row_num].store(true, std::memory_order_relaxed);
                     }
 
-
                     if (jf.is_any_join)
                     {
                         break;
                     }
                 }
             }
-        } while (multiple_disjuncts && ++d < disjunct_num);
+        }
 
         if constexpr (has_null_map)
         {
@@ -1924,10 +1925,10 @@ private:
                 {
                     if (!block_with_flags.flags[row])
                     {
-                        for (size_t colnum = 0; colnum < columns_keys_and_right.size(); ++colnum)
+                        for (size_t col_num = 0; col_num < columns_keys_and_right.size(); ++col_num)
                         {
-                            auto clmn = block_with_flags.block.getByPosition(colnum).column;
-                            columns_keys_and_right[colnum]->insertFrom(*clmn, row);
+                            auto col = block_with_flags.block.getByPosition(col_num).column;
+                            columns_keys_and_right[col_num]->insertFrom(*col, row);
                         }
 
                         ++rows_added;
